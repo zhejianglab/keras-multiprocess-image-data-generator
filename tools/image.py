@@ -1118,6 +1118,7 @@ class MetadataIterator(Iterator):
             self.classes = labels
 
         self.directory = "/"
+        self.firstPrint = True # Disable printing for debugging. 
 
         super(MetadataIterator, self).__init__(self.nb_sample, batch_size, shuffle, seed)
 
@@ -1129,16 +1130,34 @@ class MetadataIterator(Iterator):
 
         batch_x = None
         grayscale = self.color_mode == 'grayscale'
+        
+        if not self.firstPrint:
+            import traceback
+            print( "index_array shape ==== %s" % index_array.shape)
+            print( "index_array[0] ====== %s" % index_array[0])
+            for line in traceback.format_stack():
+                print(line.strip())
+            
+            self.firstPrint = True
 
         if self.pool:
-            pipeline = self.image_data_generator.pipeline()
-            result = self.pool.map(process_image_pipeline_dir, ((pipeline,
-                self.filenames[j],
-                self.directory,
-                grayscale,
-                self.target_size,
-                self.dim_ordering,
-                self.rngs[i%self.batch_size]) for i, j in enumerate(index_array)))
+            bDone = False 
+            while not bDone:
+                try:
+                    pipeline = self.image_data_generator.pipeline()
+                    result = self.pool.map(process_image_pipeline_dir, ((pipeline,
+                        self.filenames[j],
+                        self.directory,
+                        grayscale,
+                        self.target_size,
+                        self.dim_ordering,
+                        self.rngs[i%self.batch_size]) for i, j in enumerate(index_array)))
+                    bDone = True
+                except:
+                    # Error happens in the last block 
+                    print( "Skipped batch %d because of exception (file read error?), index === %s " % (current_index, index_array) )
+                    with self.lock:
+                        index_array, current_index, current_batch_size = next(self.index_generator)
             batch_x = np.array(result)
         else:
             # TODO: also utilize image_data_generator.pipeline()?
