@@ -619,7 +619,28 @@ class ImageDataGenerator(object):
             save_format=save_format,
             follow_links=follow_links,
             pool=self.pool)
-
+    
+    def flow_from_metaseq( self, metaSeq, 
+                            target_size=(256, 256), color_mode='rgb',
+                            classes=None, class_mode='categorical',
+                            batch_size=32, shuffle=True, seed=None,
+                            save_to_dir=None,
+                            save_prefix='',
+                            save_format='jpeg',
+                            follow_links=False):
+        """ Returning a sequence for training/evaluation
+        """
+        return MetadataSeqIterator(
+            metaSeq, self,
+            target_size=target_size, color_mode=color_mode,
+            classes=classes, class_mode=class_mode,
+            dim_ordering=self.dim_ordering,
+            batch_size=batch_size, shuffle=shuffle, seed=seed,
+            save_to_dir=save_to_dir,
+            save_prefix=save_prefix,
+            save_format=save_format,
+            follow_links=follow_links,
+            pool=self.pool)
 
 
     def pipeline(self):
@@ -1175,6 +1196,300 @@ class MetadataIterator(Iterator):
         # optionally save augmented images to disk for debugging purposes
         if self.save_to_dir:
             for i in range(current_batch_size):
+                img = array_to_img(batch_x[i], self.dim_ordering, scale=True)
+                fname = '{prefix}_{index}_{hash}.{format}'.format(prefix=self.save_prefix,
+                                                                  index=current_index + i,
+                                                                  hash=np.random.randint(1e4),
+                                                                  format=self.save_format)
+                img.save(os.path.join(self.save_to_dir, fname))
+        # build batch of labels
+        if self.class_mode == 'sparse':
+            batch_y = self.classes[index_array]
+        elif self.class_mode == 'binary':
+            batch_y = self.classes[index_array].astype('float32')
+        elif self.class_mode == 'categorical':
+            batch_y = np.zeros((len(batch_x), self.nb_class), dtype='float32')
+            for i, label in enumerate(self.classes[index_array]):
+                batch_y[i, label] = 1.
+        else:
+            return batch_x
+        return batch_x, batch_y
+    
+class MetadataSeqIterator(Iterator):
+    def __init__(self, metadataSeqFunc, image_data_generator,
+                 target_size=(256, 256), color_mode='rgb',
+                 dim_ordering='default',
+                 classes=None, class_mode='categorical',
+                 steps = None, 
+                 batch_size=32, shuffle=True, seed=None,
+                 save_to_dir=None, save_prefix='', save_format='jpeg',
+                 follow_links=False, pool=None):
+        if dim_ordering == 'default':
+            dim_ordering = K.image_dim_ordering()
+        self.metadataSeqFunc = metadataSeqFunc
+        self.image_data_generator = image_data_generator
+        self.target_size = tuple(target_size)
+        if color_mode not in {'rgb', 'grayscale'}:
+            raise ValueError('Invalid color mode:', color_mode,
+                             '; expected "rgb" or "grayscale".')
+        self.color_mode = color_mode
+        self.dim_ordering = dim_ordering
+        if self.color_mode == 'rgb':
+            if self.dim_ordering == 'tf':
+                self.image_shape = self.target_size + (3,)
+            else:
+                self.image_shape = (3,) + self.target_size
+        else:
+            if self.dim_ordering == 'tf':
+                self.image_shape = self.target_size + (1,)
+            else:
+                self.image_shape = (1,) + self.target_size
+        self.classes = classes
+        if class_mode not in {'categorical', 'binary', 'sparse', None}:
+            raise ValueError('Invalid class_mode:', class_mode,
+                             '; expected one of "categorical", '
+                             '"binary", "sparse", or None.')
+        self.class_mode = class_mode
+        self.save_to_dir = save_to_dir
+        self.save_prefix = save_prefix
+        self.save_format = save_format
+        self.pool = pool
+
+        white_list_formats = {'png', 'jpg', 'jpeg', 'bmp'}
+
+        # first, count the number of samples and classes
+        
+        nb_sample = 0
+        cnames = None
+        for ( filenames, labels, classnames ) in self.metadataSeqFunc():
+            nb_sample += len( filenames ) 
+            cnames = classnames
+            
+        self.nb_class = len(cnames)
+        self.class_indices = dict(zip(cnames, range(len(cnames))))
+        self.nb_sample = nb_sample
+
+        if self.class_mode == 'sparse' or self.class_mode == 'binary' or self.class_mode == 'categorical':
+            self.classes = np.asarray(labels, dtype='int32')
+        else:
+            self.classes = labels
+
+        self.directory = "/"
+        self.firstPrint = True # Disable printing for debugging. 
+        super(MetadataSeqIterator, self).__init__(self.nb_sample, batch_size, shuffle, seed)
+    
+    def reset(self):
+        with self.lock:
+            self.metadataSeqFunc().reset()
+        super(MetadataSeqIterator, self).reset()
+
+        
+    def next(self):
+        with self.lock:
+            filenames, labels, classnames = next(self.metadataSeqFunc())
+        # The transformation of images is not under thread lock
+        # so it can be done in parallel
+
+        batch_x = None
+        grayscale = self.color_mode == 'grayscale'
+        
+        if not self.firstPrint:
+            import traceback
+            print( "Labels shape ==== %s" % labels.shape)           
+            self.firstPrint = True
+
+        if self.pool:
+            bDone = False 
+            while not bDone:
+                try:
+                    nsize = len( filenames ) 
+                    pipeline = self.image_data_generator.pipeline()
+                    result = self.pool.map(process_image_pipeline_dir, ((pipeline,
+                        filenames[i],
+                        self.directory,
+                        grayscale,
+                        self.target_size,
+                        self.dim_ordering,
+                        self.rngs[i%self.batch_size]) for i in range(nsize) ))
+                    bDone = True
+                except:
+                    # Error happens in the last block 
+                    print( "Skipped batch %d because of exception (file read error?), filenanes === %s " % (filenames) )
+                    with self.lock:
+                        filenames, labels, classnames = next(self.metadataSeqFunc())
+            batch_x = np.array(result)
+        else:
+            while not bDone:
+                try:
+                    # TODO: also utilize image_data_generator.pipeline()?
+                    batch_x = np.zeros((current_batch_size,) + self.image_shape)
+                    # build batch of image data
+                    nsize = len( filenames ) 
+                    for i in enumerate(index_array):
+                        fname = filenames[i]
+                        img = load_img(os.path.join(self.directory, fname),
+                                       grayscale=grayscale,
+                                       target_size=self.target_size)
+                        x = img_to_array(img, dim_ordering=self.dim_ordering)
+                        x = self.image_data_generator.random_transform(x)
+                        x = self.image_data_generator.standardize(x)
+                        batch_x[i] = x
+                except:
+                    # Error happens in the last block 
+                    print( "Skipped batch %d because of exception (file read error?), filenanes === %s " % (filenames) )
+                    with self.lock:
+                        filenames, labels, classnames = next(self.metadataSeqFunc()) 
+                
+        # optionally save augmented images to disk for debugging purposes
+        if self.save_to_dir:
+            for i in range(nsize):
+                img = array_to_img(batch_x[i], self.dim_ordering, scale=True)
+                fname = '{prefix}_{index}_{hash}.{format}'.format(prefix=self.save_prefix,
+                                                                  index=current_index + i,
+                                                                  hash=np.random.randint(1e4),
+                                                                  format=self.save_format)
+                img.save(os.path.join(self.save_to_dir, fname))
+        # build batch of labels
+        if self.class_mode == 'sparse':
+            batch_y = self.classes[index_array]
+        elif self.class_mode == 'binary':
+            batch_y = self.classes[index_array].astype('float32')
+        elif self.class_mode == 'categorical':
+            batch_y = np.zeros((len(batch_x), self.nb_class), dtype='float32')
+            for i, label in enumerate(self.classes[index_array]):
+                batch_y[i, label] = 1.
+        else:
+            return batch_x
+        return batch_x, batch_y
+
+class MetadataSeqSiameseIterator(Iterator):
+    def __init__(self, metadataSeqFunc, image_data_generator,
+                 target_size=(256, 256), color_mode='rgb',
+                 dim_ordering='default',
+                 classes=None, class_mode='categorical',
+                 steps = None, 
+                 batch_size=32, shuffle=True, seed=None,
+                 save_to_dir=None, save_prefix='', save_format='jpeg',
+                 follow_links=False, pool=None):
+        if dim_ordering == 'default':
+            dim_ordering = K.image_dim_ordering()
+        self.metadataSeqFunc = metadataSeqFunc
+        self.image_data_generator = image_data_generator
+        self.target_size = tuple(target_size)
+        if color_mode not in {'rgb', 'grayscale'}:
+            raise ValueError('Invalid color mode:', color_mode,
+                             '; expected "rgb" or "grayscale".')
+        self.color_mode = color_mode
+        self.dim_ordering = dim_ordering
+        if self.color_mode == 'rgb':
+            if self.dim_ordering == 'tf':
+                self.image_shape = self.target_size + (3,)
+            else:
+                self.image_shape = (3,) + self.target_size
+        else:
+            if self.dim_ordering == 'tf':
+                self.image_shape = self.target_size + (1,)
+            else:
+                self.image_shape = (1,) + self.target_size
+        self.classes = classes
+        if class_mode not in {'categorical', 'binary', 'sparse', None}:
+            raise ValueError('Invalid class_mode:', class_mode,
+                             '; expected one of "categorical", '
+                             '"binary", "sparse", or None.')
+        self.class_mode = class_mode
+        self.save_to_dir = save_to_dir
+        self.save_prefix = save_prefix
+        self.save_format = save_format
+        self.pool = pool
+
+        white_list_formats = {'png', 'jpg', 'jpeg', 'bmp'}
+
+        # first, count the number of samples and classes
+        
+        nb_sample = 0
+        cnames = None
+        for ( filenames, labels, classnames ) in self.metadataSeqFunc():
+            nb_sample += len( filenames ) 
+            cnames = classnames
+            
+        self.nb_class = len(cnames)
+        self.class_indices = dict(zip(cnames, range(len(cnames))))
+        self.nb_sample = nb_sample
+
+        if self.class_mode == 'sparse' or self.class_mode == 'binary' or self.class_mode == 'categorical':
+            self.classes = np.asarray(labels, dtype='int32')
+        else:
+            self.classes = labels
+
+        self.directory = "/"
+        self.firstPrint = True # Disable printing for debugging. 
+        super(MetadataSeqSiameseIterator, self).__init__(self.nb_sample, batch_size, shuffle, seed)
+    
+    def reset(self):
+        with self.lock:
+            self.metadataSeqFunc().reset()
+        super(MetadataSeqSiameseIterator, self).reset()
+
+        
+    def next(self):
+        with self.lock:
+            filenames, labels, classnames = next(self.metadataSeqFunc())
+        # The transformation of images is not under thread lock
+        # so it can be done in parallel
+
+        batch_x = None
+        grayscale = self.color_mode == 'grayscale'
+        
+        if not self.firstPrint:
+            import traceback
+            print( "Labels shape ==== %s" % labels.shape)           
+            self.firstPrint = True
+
+        if self.pool:
+            bDone = False 
+            while not bDone:
+                try:
+                    nsize = len( filenames ) 
+                    pipeline = self.image_data_generator.pipeline()
+                    result = self.pool.map(process_image_pipeline_dir, ((pipeline,
+                        filenames[i],
+                        self.directory,
+                        grayscale,
+                        self.target_size,
+                        self.dim_ordering,
+                        self.rngs[i%self.batch_size]) for i in range(nsize) ))
+                    bDone = True
+                except:
+                    # Error happens in the last block 
+                    print( "Skipped batch %d because of exception (file read error?), filenanes === %s " % (filenames) )
+                    with self.lock:
+                        filenames, labels, classnames = next(self.metadataSeqFunc())
+            batch_x = np.array(result)
+        else:
+            while not bDone:
+                try:
+                    # TODO: also utilize image_data_generator.pipeline()?
+                    batch_x = np.zeros((current_batch_size,) + self.image_shape)
+                    # build batch of image data
+                    nsize = len( filenames ) 
+                    for i in enumerate(index_array):
+                        fname = filenames[i]
+                        img = load_img(os.path.join(self.directory, fname),
+                                       grayscale=grayscale,
+                                       target_size=self.target_size)
+                        x = img_to_array(img, dim_ordering=self.dim_ordering)
+                        x = self.image_data_generator.random_transform(x)
+                        x = self.image_data_generator.standardize(x)
+                        batch_x[i] = x
+                except:
+                    # Error happens in the last block 
+                    print( "Skipped batch %d because of exception (file read error?), filenanes === %s " % (filenames) )
+                    with self.lock:
+                        filenames, labels, classnames = next(self.metadataSeqFunc()) 
+                
+        # optionally save augmented images to disk for debugging purposes
+        if self.save_to_dir:
+            for i in range(nsize):
                 img = array_to_img(batch_x[i], self.dim_ordering, scale=True)
                 fname = '{prefix}_{index}_{hash}.{format}'.format(prefix=self.save_prefix,
                                                                   index=current_index + i,
