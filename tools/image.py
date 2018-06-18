@@ -1261,9 +1261,12 @@ class MetadataSeqIterator(Iterator):
         
         nb_sample = 0
         cnames = None
-        for ( filenames, labels, classnames ) in self.metadataSeqFunc():
+        labels = None
+        for ( filenames, uselabels, classnames ) in self.metadataSeqFunc():
             nb_sample += len( filenames ) 
             cnames = classnames
+            labels = uselabels
+            
             
         self.nb_class = len(cnames)
         self.class_indices = dict(zip(cnames, range(len(cnames))))
@@ -1351,22 +1354,26 @@ class MetadataSeqIterator(Iterator):
                 img.save(os.path.join(self.save_to_dir, fname))
         # build batch of labels
         if self.class_mode == 'sparse':
-            batch_y = self.classes[index_array]
+            batch_y = np.zeros( (nsize, self.nb_class), dtype='float32' )
+            batch_y[ np.arrange( nsize), labels ] = 1
         elif self.class_mode == 'binary':
-            batch_y = self.classes[index_array].astype('float32')
+            batch_y = np.array(labels).astype('float32')
         elif self.class_mode == 'categorical':
-            batch_y = np.zeros((len(batch_x), self.nb_class), dtype='float32')
-            for i, label in enumerate(self.classes[index_array]):
-                batch_y[i, label] = 1.
+            batch_y = np.zeros((nsize, self.nb_class), dtype='float32')
+            batch_y[ np.arrange( nsize), labels ] = 1
+            # for i, label in enumerate(labels):
+            #    batch_y[i, label] = 1.
         else:
             return batch_x
         return batch_x, batch_y
 
+# Siamese should be binary 
+# metadataSeqFunc should return [(filename1, filename2)], label
 class MetadataSeqSiameseIterator(Iterator):
     def __init__(self, metadataSeqFunc, image_data_generator,
                  target_size=(256, 256), color_mode='rgb',
                  dim_ordering='default',
-                 classes=None, class_mode='categorical',
+                 classes=None, class_mode='binary',
                  steps = None, 
                  batch_size=32, shuffle=True, seed=None,
                  save_to_dir=None, save_prefix='', save_format='jpeg',
@@ -1392,7 +1399,7 @@ class MetadataSeqSiameseIterator(Iterator):
             else:
                 self.image_shape = (1,) + self.target_size
         self.classes = classes
-        if class_mode not in {'categorical', 'binary', 'sparse', None}:
+        if class_mode not in {'binary'} # {'categorical', 'binary', 'sparse', None}:
             raise ValueError('Invalid class_mode:', class_mode,
                              '; expected one of "categorical", '
                              '"binary", "sparse", or None.')
@@ -1403,17 +1410,20 @@ class MetadataSeqSiameseIterator(Iterator):
         self.pool = pool
 
         white_list_formats = {'png', 'jpg', 'jpeg', 'bmp'}
-
-        # first, count the number of samples and classes
         
-        nb_sample = 0
-        cnames = None
-        for ( filenames, labels, classnames ) in self.metadataSeqFunc():
-            nb_sample += len( filenames ) 
-            cnames = classnames
-            
-        self.nb_class = len(cnames)
-        self.class_indices = dict(zip(cnames, range(len(cnames))))
+        if steps is None:
+            # first, count the number of samples and classes
+            nb_sample = 0
+            labels = None
+            for ( filenames, uselabels ) in self.metadataSeqFunc():
+                nb_sample += len( filenames ) 
+                labels = uselabels
+        else:
+            nb_sample = step * batch_size
+            labels = [0]
+           
+        self.nb_class = 1 # len(cnames)
+        self.class_indices = {'similarity': 0 } # dict(zip(cnames, range(len(cnames))))
         self.nb_sample = nb_sample
 
         if self.class_mode == 'sparse' or self.class_mode == 'binary' or self.class_mode == 'categorical':
@@ -1433,7 +1443,7 @@ class MetadataSeqSiameseIterator(Iterator):
         
     def next(self):
         with self.lock:
-            filenames, labels, classnames = next(self.metadataSeqFunc())
+            filenames, labels = next(self.metadataSeqFunc())
         # The transformation of images is not under thread lock
         # so it can be done in parallel
 
@@ -1451,8 +1461,15 @@ class MetadataSeqSiameseIterator(Iterator):
                 try:
                     nsize = len( filenames ) 
                     pipeline = self.image_data_generator.pipeline()
-                    result = self.pool.map(process_image_pipeline_dir, ((pipeline,
-                        filenames[i],
+                    result0 = self.pool.map(process_image_pipeline_dir, ((pipeline,
+                        filenames[i][0],
+                        self.directory,
+                        grayscale,
+                        self.target_size,
+                        self.dim_ordering,
+                        self.rngs[i%self.batch_size]) for i in range(nsize) ))
+                    result1 = self.pool.map(process_image_pipeline_dir, ((pipeline,
+                        filenames[i][1],
                         self.directory,
                         grayscale,
                         self.target_size,
@@ -1463,48 +1480,65 @@ class MetadataSeqSiameseIterator(Iterator):
                     # Error happens in the last block 
                     print( "Skipped batch %d because of exception (file read error?), filenanes === %s " % (filenames) )
                     with self.lock:
-                        filenames, labels, classnames = next(self.metadataSeqFunc())
-            batch_x = np.array(result)
+                        filenames, labels = next(self.metadataSeqFunc())
+            pairs = []
+            for i in range( nsize ):
+                pairs += [[result0[i], result1[i]]]
+            batch_x = np.array(pairs)
         else:
             while not bDone:
                 try:
                     # TODO: also utilize image_data_generator.pipeline()?
-                    batch_x = np.zeros((current_batch_size,) + self.image_shape)
+                    pairs = []
                     # build batch of image data
                     nsize = len( filenames ) 
                     for i in enumerate(index_array):
-                        fname = filenames[i]
+                        fname = filenames[i][0]
                         img = load_img(os.path.join(self.directory, fname),
                                        grayscale=grayscale,
                                        target_size=self.target_size)
                         x = img_to_array(img, dim_ordering=self.dim_ordering)
                         x = self.image_data_generator.random_transform(x)
-                        x = self.image_data_generator.standardize(x)
-                        batch_x[i] = x
+                        x0 = self.image_data_generator.standardize(x)
+                        fname = filenames[i][1]
+                        img = load_img(os.path.join(self.directory, fname),
+                                       grayscale=grayscale,
+                                       target_size=self.target_size)
+                        x = img_to_array(img, dim_ordering=self.dim_ordering)
+                        x = self.image_data_generator.random_transform(x)
+                        x1 = self.image_data_generator.standardize(x)
+                        pairs += [[x0, x1]]
+                    bDone = True
                 except:
                     # Error happens in the last block 
                     print( "Skipped batch %d because of exception (file read error?), filenanes === %s " % (filenames) )
                     with self.lock:
-                        filenames, labels, classnames = next(self.metadataSeqFunc()) 
-                
+                        filenames, labels = next(self.metadataSeqFunc()) 
+            batch_x = np.array(pairs)
+
         # optionally save augmented images to disk for debugging purposes
         if self.save_to_dir:
             for i in range(nsize):
-                img = array_to_img(batch_x[i], self.dim_ordering, scale=True)
+                img0 = array_to_img(batch_x[i][0], self.dim_ordering, scale=True)
+                img1 = array_to_img(batch_x[i][1], self.dim_ordering, scale=True)
+                label = labels[i]
+                hashinfo = np.random.randint(1e4)
                 fname = '{prefix}_{index}_{hash}.{format}'.format(prefix=self.save_prefix,
                                                                   index=current_index + i,
-                                                                  hash=np.random.randint(1e4),
+                                                                  hash=hashinfo,
                                                                   format=self.save_format)
-                img.save(os.path.join(self.save_to_dir, fname))
+                img0.save(os.path.join(self.save_to_dir, fname))
+                flag = ['neg', 'pos'][label]
+                fname1 = '{prefix}_{index}_{hash}_{flag}.{format}'.format(prefix=self.save_prefix,
+                                                                  index=current_index + i,
+                                                                  hash=hashinfo,
+                                                                  flag=flag,
+                                                                  format=self.save_format)
+                img1.save(os.path.join(self.save_to_dir, fname1))
+
         # build batch of labels
-        if self.class_mode == 'sparse':
-            batch_y = self.classes[index_array]
-        elif self.class_mode == 'binary':
-            batch_y = self.classes[index_array].astype('float32')
-        elif self.class_mode == 'categorical':
-            batch_y = np.zeros((len(batch_x), self.nb_class), dtype='float32')
-            for i, label in enumerate(self.classes[index_array]):
-                batch_y[i, label] = 1.
+        if self.class_mode == 'binary':
+            batch_y = np.array( labels ) 
         else:
             return batch_x
         return batch_x, batch_y
