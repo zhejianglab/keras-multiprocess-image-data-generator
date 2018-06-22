@@ -1386,7 +1386,7 @@ class MetadataSeqIterator(Iterator):
             batch_y = np.array(labels).astype('float32')
         elif self.class_mode == 'categorical':
             batch_y = np.zeros((nsize, self.nb_class), dtype='float32')
-            batch_y[ np.arrange( nsize), labels ] = 1
+            batch_y[ np.arange( nsize), labels ] = 1
             # for i, label in enumerate(labels):
             #    batch_y[i, label] = 1.
         else:
@@ -1626,9 +1626,58 @@ class MetadataSeq():
         self.index = self.index + self.batch_size
         return filenames, labels, self.classnames
     @property
+    def classes(self):
+        np.asarray(list( map( lambda x: x[1], self.filelist )), dtype = 'int' )
+    @property
     def steps(self):
         nsize = len( self.filelist )
         return nsize // self.batch_size
+    @property
+    def histogram(self):
+        hist = np.zeros( (len(self.classnames)) )
+        for key, value in self.metadata.items():
+            hist[self.mapping[key]] = len(value)
+        return hist
+    
+class MulticropSeq():
+    def __init__(self, classnames, filelist, metadata, mapping, batch_size, ncrop, verbose = True, root_dir = None ):
+        self.verbose = verbose
+        if root_dir is None:
+            self.root_dir = "./" 
+        else:
+            self.root_dir = root_dir
+        self.classnames = classnames
+        self.filelist = filelist
+        self.index = 0
+        self.batch_size = batch_size
+        self.ncrop = ncrop
+        self.metadata = metadata
+        self.mapping = mapping 
+    def reset():
+        self.index = 0
+    def __iter__(self):
+        return self        
+    def __next__(self):
+        filenames = []
+        labels = []
+        nsize = len( self.filelist )
+        if ( self.index + 1 )* self.batch_size > nsize * self.ncrop:
+            self.index = 0
+            raise StopIteration
+        idx = self.index * self.batch_size
+        for i in range( self.batch_size):
+            cur = self.filelist[ (i+idx) // self.ncrop ]
+            filenames.append( os.path.join( self.root_dir, cur[0] ) )
+            labels.append( cur[1] )
+        self.index += 1
+        return filenames, labels, self.classnames
+    @property
+    def classes(self):
+        return np.asarray(list( map( lambda x: x[1], self.filelist )), dtype = 'int' )
+    @property
+    def steps(self):
+        nsize = len( self.filelist )
+        return nsize * self.ncrop // self.batch_size
     @property
     def histogram(self):
         hist = np.zeros( (len(self.classnames)) )
@@ -1720,6 +1769,9 @@ class MetadataSeqSiamese():
         return hist
     
 
+############################################################
+#  Dataset
+############################################################
     
 class DatasetSubdirectory():
     def __init__(self, root_dir, metadata_file, data_dir, verbose = True, seed = 0, splits = {"train": 80, "val": 20 } ):
@@ -1742,10 +1794,11 @@ class DatasetSubdirectory():
             self.prepare_metadata()
         
     
-    def prepare_metadata():
+    def prepare_metadata(self):
         classmapping = {}
     
         numdir = 0 
+        metadata = {}
         for root, dirs, files in os.walk( self.data_dir ):
             if len( files ) > 0:
                 basename = os.path.basename( root )
@@ -1756,23 +1809,43 @@ class DatasetSubdirectory():
                     print( "Proccess %d directories ... " % numdir )
 
         info = metadata
-        with open( METADATA_FILE, "w") as outfile:
+        with open( self.metadata_file, "w") as outfile:
             json.dump( info, outfile )
         
     # this should be called to initialize all necessary data structure 
     # Train threshold: at least this number of samples in training. 
-    def prepare( self, seed = 0, splits = {"train": 80, "val": 20 }, train_threshold = 5 ): 
-        
+    # Mapping: a dictionary that maps a class name (subdirectory) to a category
+    # classes: a list of classes that intrepret classname -> pos
+    def prepare( self, seed = 0, splits = {"train": 80, "val": 20 }, train_threshold = 5, classes = None, mapping = None ): 
         with open( self.metadata_file, "r") as fp:
             metadata = json.load( fp )
         lst = []
         cnt = 0
+        bComputeMapping = False
+        if not (mapping is None): 
+            self.mapping = mapping
+            mx = 0 
+            for key, value in mapping.items():
+                mx = max( mx, value )
+            self.classnames = "0" * (mx + 1 )
+            for key, value in mapping.items():
+                self.classnames[value] = key
+        else:
+            if not (classes is None):
+                for idx, classname in enumerate(classes):
+                    self.mapping[classname] = idx
+                self.classnames = classes
+            else:
+                bComputeMapping = True
+                
         # print(len(self.metadata))
         for classname, filesinfo in metadata.items():
-            self.mapping[classname] = cnt
-            self.classnames.append( classname )
+            if bComputeMapping:
+                self.mapping[classname] = cnt
+                self.classnames.append( classname )
+            cl = self.mapping[classname]
             for file in filesinfo:
-                lst.append( (file, cnt) ) 
+                lst.append( (file, cl) ) 
             cnt = cnt + 1
             
         random.Random(seed).shuffle(lst)
@@ -1798,16 +1871,17 @@ class DatasetSubdirectory():
             start = end
             
         # Identify if any item has very low number of class in training (not trainable ). 
-        move_class = []
-        for classname, filelists in self.metadata["train"].items():
-            if len( filelists ) < train_threshold:
-                move_class.append( classname )
-        for classname in move_class:
-            if not (classname in self.metadata["val"]):
-                self.metadata["val"][classname] = self.metadata["train"][classname]
-            else:
-                self.metadata["val"][classname] += self.metadata["train"][classname]
-            self.metadata["train"].pop(classname)
+        if train_threshold > 0 and "train" in self.metadata and "val" in self.metadata:
+            move_class = []
+            for classname, filelists in self.metadata["train"].items():
+                if len( filelists ) < train_threshold:
+                    move_class.append( classname )
+            for classname in move_class:
+                if not (classname in self.metadata["val"]):
+                    self.metadata["val"][classname] = self.metadata["train"][classname]
+                else:
+                    self.metadata["val"][classname] += self.metadata["train"][classname]
+                self.metadata["train"].pop(classname)
         # Form list. move proper list from train to val if of lower count
         start = 0
         cumul = 0
@@ -1832,8 +1906,86 @@ class DatasetSubdirectory():
         assert subset in self.list
         return make_closure( MetadataSeq( self.classnames, self.list[subset], self.metadata[subset], self.mapping, batch_size, verbose = self.verbose, root_dir=self.data_dir ) )
     
+    def metadata_multicrop_seq( self, subset, batch_size, ncrop ):
+        assert subset in self.list
+        return make_closure( MulticropSeq( self.classnames, self.list[subset], self.metadata[subset], self.mapping, batch_size, ncrop, verbose = self.verbose, root_dir=self.data_dir ) )
+    
     def metadata_seq_siamese( self, subset, batch_size ):
         if subset == "train":
             return make_closure( MetadataSeqSiamese( self.classnames, self.list[subset], self.metadata[subset], self.mapping, batch_size, verbose = self.verbose, root_dir=self.data_dir ) )
         else:
             return make_closure( MetadataSeqSiamese( self.classnames, self.list[subset], { **self.metadata[subset], **self.metadata["train"] }, self.mapping, batch_size, verbose = self.verbose, root_dir=self.data_dir, seed = self.seed ) )
+
+# Helper function for image classification        
+class ClassificationResults():
+    def __init__(self, pred, truth, num_classes):
+        self.pred = pred
+        self.truth = truth
+        self.num_classes = num_classes
+        self.truepositive = np.array([0]*num_classes)
+        self.truenegative = np.array([0]*num_classes)
+        self.falsepositive = np.array([0]*num_classes)
+        ff = np.array([0]*num_classes)
+        for i in range(len(truth)):
+            j = truth[i]
+            if j == pred[i]:
+                # Actual class is j and it is predicted as j:
+                self.truepositive[j] += 1
+            else:
+                # Prediction result is different 
+                self.truenegative[j] += 1
+                k = pred[i]
+                self.falsepositive[k] += 1
+    @property
+    def recall(self):
+        return self.truepositive / ( self.truepositive + self.truenegative )
+    @property
+    def precision(self):
+        return self.truepositive / ( self.truepositive + self.falsepositive )
+    @property
+    def f1(self):
+        return 2/( (1/self.recall) + 1/ (self.precision) )
+        
+import itertools
+import matplotlib.pyplot as plt
+def plot_confusion_matrix(cm, classes,
+                          normalize=False,
+                          title='Confusion matrix',
+                          cmap=plt.cm.Blues):
+    """
+    This function prints and plots the confusion matrix.
+    Normalization can be applied by setting `normalize=True`.
+    """
+    if normalize:
+        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        print("Normalized confusion matrix")
+    else:
+        print('Confusion matrix, without normalization')
+
+    print(cm)
+
+    plt.imshow(cm, interpolation='nearest', cmap=cmap)
+    plt.title(title)
+    plt.colorbar()
+    tick_marks = np.arange(len(classes))
+    plt.xticks(tick_marks, classes, rotation=45)
+    plt.yticks(tick_marks, classes)
+
+    fmt = '.2f' if normalize else 'd'
+    thresh = cm.max() / 2.
+    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+        plt.text(j, i, format(cm[i, j], fmt),
+                 horizontalalignment="center",
+                 color="white" if cm[i, j] > thresh else "black")
+
+    plt.tight_layout()
+    plt.ylabel('True label')
+    plt.xlabel('Predicted label')
+
+def process_ncrop_result( result, ncrop):
+    nx, ny = result.shape
+    nsize = nx // ncrop
+    ret = np.zeros( (nsize, ny) ) 
+    for i in range( nsize):
+        ret[i,:] = np.mean( result[i*ncrop:(i+1)*ncrop, :], axis=0 )
+    return ret
