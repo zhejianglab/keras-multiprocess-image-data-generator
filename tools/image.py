@@ -1989,3 +1989,33 @@ def process_ncrop_result( result, ncrop):
     for i in range( nsize):
         ret[i,:] = np.mean( result[i*ncrop:(i+1)*ncrop, :], axis=0 )
     return ret
+
+class ImageReader:
+    def __init__(self, rootdir, dim_ordering='default', **kwargs ):
+        self.rootdir = rootdir
+        self.kwargs = kwargs
+        self.dim_ordering = dim_ordering
+    def read( self, file ):
+        image = load_img( os.path.join(self.rootdir, file), **self.kwargs )
+        img = img_to_array( image, dim_ordering = self.dim_ordering )
+        # print (img.shape )
+        return img
+
+def read_in_images( rootdir, pattern=".*.jpg", pool = None, dim_ordering='default', **kwargs ):
+    ex = re.compile( pattern )
+    filelist = []
+    for file in os.listdir(rootdir):
+        if ex.match( file ):
+            filelist.append(file)
+    filelist.sort()
+    if pool:
+        imgReader = ImageReader( rootdir, dim_ordering, **kwargs ) 
+        images = pool.map( imgReader.read, filelist )
+    else:
+        images = []
+        for f in filelist:
+            image = load_img( os.path.join(rootdir, f), **kwargs)
+            img = img_to_array( image, dim_ordering = dim_ordering )
+            # print (img.shape )
+            images.append( img )
+    return filelist, np.array( images )
