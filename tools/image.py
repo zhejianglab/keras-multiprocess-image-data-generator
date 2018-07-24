@@ -1687,7 +1687,7 @@ class MulticropSeq():
 
 # Siamese sequence: return a pair of image (positive, negative). 
 class MetadataSeqSiamese():
-    def __init__(self, classnames, filelist, metadata, mapping, batch_size, verbose = True, root_dir = None, seed = 0 ):
+    def __init__(self, classnames, filelist, metadata, mapping, batch_size, verbose = True, root_dir = None, seed = 0, equiv = None ):
         self.verbose = verbose
         if root_dir is None:
             self.root_dir = "./" 
@@ -1701,6 +1701,7 @@ class MetadataSeqSiamese():
         self.mapping = mapping 
         self.seed = seed 
         self.rng = random.Random(self.seed)
+        self.equiv = equiv
     def reset():
         self.index = 0
         self.rng = random.Random(self.seed)
@@ -1742,7 +1743,16 @@ class MetadataSeqSiamese():
                 while not bFind:
                     nclasses = len( self.classnames)
                     cidx = self.rng.randint( 0, nclasses - 1 )
-                    if cidx != cl:
+                    bNegative = cidx != cl
+                    if self.equiv and bNegative:
+                        # Evaluate on equivalent class 
+                        classname1 = self.classnames[cidx]
+                        if classname in self.equiv:
+                            if classname1 in self.equiv[classname]:
+                                # The two classes are equivalent
+                                bNegative = False
+                                print( "Search again, classes %s and %s are equivalent ... " % (classname, classname1) )
+                    if bNegative:
                         # find a negative example
                         classname = self.classnames[cidx]
                         if classname in self.metadata:
@@ -1774,7 +1784,7 @@ class MetadataSeqSiamese():
 ############################################################
     
 class DatasetSubdirectory():
-    def __init__(self, root_dir, metadata_file, data_dir, verbose = True, seed = 0, splits = {"train": 80, "val": 20 } ):
+    def __init__(self, root_dir, metadata_file, data_dir, equiv_file = None, verbose = True, seed = 0, splits = {"train": 80, "val": 20 } ):
         super().__init__() 
         self.metadata = { }
         self.metadata_nontrain = { }
@@ -1792,7 +1802,7 @@ class DatasetSubdirectory():
         self.metadata_file = os.path.join( self.root_dir, metadata_file)
         if not os.path.isfile( self.metadata_file):
             self.prepare_metadata()
-        
+        self.equiv_file = equiv_file
     
     def prepare_metadata(self):
         classmapping = {}
@@ -1911,10 +1921,15 @@ class DatasetSubdirectory():
         return make_closure( MulticropSeq( self.classnames, self.list[subset], self.metadata[subset], self.mapping, batch_size, ncrop, verbose = self.verbose, root_dir=self.data_dir ) )
     
     def metadata_seq_siamese( self, subset, batch_size ):
+        equiv = None
+        if self.equiv_file:
+            filename = os.path.join( self.root_dir, self.equiv_file)
+            with open( filename, "r") as fp:
+                equiv = json.load( fp )
         if subset == "train":
-            return make_closure( MetadataSeqSiamese( self.classnames, self.list[subset], self.metadata[subset], self.mapping, batch_size, verbose = self.verbose, root_dir=self.data_dir ) )
+            return make_closure( MetadataSeqSiamese( self.classnames, self.list[subset], self.metadata[subset], self.mapping, batch_size, verbose = self.verbose, root_dir=self.data_dir, equiv = equiv ) )
         else:
-            return make_closure( MetadataSeqSiamese( self.classnames, self.list[subset], { **self.metadata[subset], **self.metadata["train"] }, self.mapping, batch_size, verbose = self.verbose, root_dir=self.data_dir, seed = self.seed ) )
+            return make_closure( MetadataSeqSiamese( self.classnames, self.list[subset], { **self.metadata[subset], **self.metadata["train"] }, self.mapping, batch_size, verbose = self.verbose, root_dir=self.data_dir, seed = self.seed, equiv = equiv ) )
 
 # Helper function for image classification        
 class ClassificationResults():
