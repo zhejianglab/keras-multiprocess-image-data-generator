@@ -629,7 +629,8 @@ class ImageDataGenerator(object):
                             save_to_dir=None,
                             save_prefix='',
                             save_format='jpeg',
-                            follow_links=False):
+                            follow_links=False, 
+                            raise_exception = False ):
         """ Returning a sequence for training/evaluation
         """
         return MetadataSeqIterator(
@@ -642,6 +643,7 @@ class ImageDataGenerator(object):
             save_prefix=save_prefix,
             save_format=save_format,
             follow_links=follow_links,
+            raise_exception = raise_exception,
             pool=self.pool)
     
     def flow_from_metaseq_siamese( self, metaSeq, 
@@ -1249,10 +1251,12 @@ class MetadataSeqIterator(Iterator):
                  steps = None, 
                  batch_size=32, shuffle=True, seed=None,
                  save_to_dir=None, save_prefix='', save_format='jpeg',
-                 follow_links=False, pool=None):
+                 follow_links=False, 
+                 raise_exception = False, 
+                 pool=None):
         if dim_ordering == 'default':
             dim_ordering = K.image_dim_ordering()
-        self.metadataSeqFunc = metadataSeqFunc
+        self.metadataSeq = metadataSeqFunc()
         self.image_data_generator = image_data_generator
         self.target_size = tuple(target_size)
         if color_mode not in {'rgb', 'grayscale'}:
@@ -1288,7 +1292,7 @@ class MetadataSeqIterator(Iterator):
         nb_sample = 0
         cnames = None
         labels = None
-        for ( filenames, uselabels, classnames ) in self.metadataSeqFunc():
+        for ( filenames, uselabels, classnames ) in metadataSeqFunc():
             nb_sample += len( filenames ) 
             cnames = classnames
             labels = uselabels
@@ -1305,17 +1309,25 @@ class MetadataSeqIterator(Iterator):
 
         self.directory = "/"
         self.firstPrint = True # Disable printing for debugging. 
+        self.raise_exception = raise_exception
         super(MetadataSeqIterator, self).__init__(self.nb_sample, batch_size, shuffle, seed)
     
     def reset(self):
         with self.lock:
-            self.metadataSeqFunc().reset()
+            self.metadataSeq.reset()
         super(MetadataSeqIterator, self).reset()
-
+   
+    def __len__(self):
+        return len(self.metadataSeq)
         
     def next(self):
         with self.lock:
-            filenames, labels, classnames = next(self.metadataSeqFunc())
+            try:
+                filenames, labels, classnames = next(self.metadataSeq)
+            except StopIteration:
+                if self.raise_exception:
+                    raise
+                filenames, labels, classnames = next(self.metadataSeq)
         # The transformation of images is not under thread lock
         # so it can be done in parallel
 
@@ -1345,7 +1357,12 @@ class MetadataSeqIterator(Iterator):
                     # Error happens in the last block 
                     print( "Skipped batch because of exception (file read error?), filenames === %s " % (filenames) )
                     with self.lock:
-                        filenames, labels, classnames = next(self.metadataSeqFunc())
+                        try:
+                            filenames, labels, classnames = next(self.metadataSeq)
+                        except StopIteration:
+                            if self.raise_exception:
+                                raise
+                            filenames, labels, classnames = next(self.metadataSeq)
             batch_x = np.array(result)
         else:
             while not bDone:
@@ -1367,7 +1384,13 @@ class MetadataSeqIterator(Iterator):
                     # Error happens in the last block 
                     print( "Skipped batch because of exception (file read error?), filenames === %s " % (filenames) )
                     with self.lock:
-                        filenames, labels, classnames = next(self.metadataSeqFunc()) 
+                        try:
+                            filenames, labels, classnames = next(self.metadataSeq)
+                        except StopIteration:
+                            if self.raise_exception:
+                                rais
+                            filenames, labels, classnames = next(self.metadataSeq)
+
                 
         # optionally save augmented images to disk for debugging purposes
         if self.save_to_dir:
@@ -1406,7 +1429,7 @@ class MetadataSeqSiameseIterator(Iterator):
                  follow_links=False, pool=None):
         if dim_ordering == 'default':
             dim_ordering = K.image_dim_ordering()
-        self.metadataSeqFunc = metadataSeqFunc
+        self.metadataSeq = metadataSeqFunc()
         self.image_data_generator = image_data_generator
         self.target_size = tuple(target_size)
         if color_mode not in {'rgb', 'grayscale'}:
@@ -1441,7 +1464,7 @@ class MetadataSeqSiameseIterator(Iterator):
             # first, count the number of samples and classes
             nb_sample = 0
             labels = None
-            for ( filenames, uselabels ) in self.metadataSeqFunc():
+            for ( filenames, uselabels ) in metadataSeqFunc():
                 nb_sample += len( filenames ) 
                 labels = uselabels
         else:
@@ -1463,13 +1486,16 @@ class MetadataSeqSiameseIterator(Iterator):
     
     def reset(self):
         with self.lock:
-            self.metadataSeqFunc().reset()
+            self.metadataSeq.reset()
         super(MetadataSeqSiameseIterator, self).reset()
 
         
     def next(self):
         with self.lock:
-            filenames, labels = next(self.metadataSeqFunc())
+            try:
+                filenames, labels = next(self.metadataSeq)
+            except StopIteration:
+                filenames, labels = next(self.metadataSeq)
         # The transformation of images is not under thread lock
         # so it can be done in parallel
 
@@ -1507,7 +1533,10 @@ class MetadataSeqSiameseIterator(Iterator):
                     # Error happens in the last block 
                     print( "Skipped batch because of exception (file read error?), filanames === %s " % (filenames) )
                     with self.lock:
-                        filenames, labels = next(self.metadataSeqFunc())
+                        try:
+                            filenames, labels = next(self.metadataSeq)
+                        except StopIteration:
+                            filenames, labels = next(self.metadataSeq)
             batch_x = [np.array(result0), np.array( result1) ]
             # print( "Batch size === %d" % (batch_x[0].shape[0]) )
             # pairs = []
@@ -1556,7 +1585,10 @@ class MetadataSeqSiameseIterator(Iterator):
                     # Error happens in the last block 
                     print( "Skipped batch because of exception (file read error?), filenames === %s " % (filenames) )
                     with self.lock:
-                        filenames, labels = next(self.metadataSeqFunc()) 
+                        try:
+                            filenames, labels = next(self.metadataSeq) 
+                        except StopIteration:
+                            filenames, labels = next(self.metadataSeq)
             batch_x = [ np.array( pairs0 ), np.array( pairs1 ) ]
 
         # optionally save augmented images to disk for debugging purposes
@@ -1611,7 +1643,9 @@ class MetadataSeq():
     def reset():
         self.index = 0
     def __iter__(self):
-        return self        
+        return self  
+    def __len__(self):
+        return len(self.filelist)
     def __next__(self):
         filenames = []
         labels = []
@@ -1847,7 +1881,8 @@ class DatasetSubdirectory():
                 self.classnames = classes
             else:
                 bComputeMapping = True
-                
+        if splits is None:
+            splits = {}
         # print(len(self.metadata))
         for classname, filesinfo in metadata.items():
             if bComputeMapping:
@@ -1909,10 +1944,25 @@ class DatasetSubdirectory():
                     # Move train to val
                     self.list["val"].append( ( os.path.join(classname, fname),cl))
             start = end
-        for key, value in splits.items():
-            print( "Data %s has %d items" % (key, len(self.list[key]) ) )
+            
+            
+        self.list["all"] = []
+        self.metadata["all"] = {}
+        for tup in lst:
+            fname = tup[0]
+            cl = tup[1]
+            classname = self.classnames[cl]
+            self.list["all"].append( (os.path.join( classname, fname), cl ) )
+            if not ( classname in self.metadata["all"] ):
+                self.metadata["all"][classname] = []
+            self.metadata["all"][classname].append( fname ) 
+            
+        for key, value in self.list.items():
+            print( "%s Data %s has %d items" % (self.data_dir, key, len(self.list[key]) ) )
 
-    def metadata_seq( self, subset, batch_size ):
+    def metadata_seq( self, subset=None, batch_size=32 ):
+        if subset is None:
+            subset = "all"
         assert subset in self.list
         return make_closure( MetadataSeq( self.classnames, self.list[subset], self.metadata[subset], self.mapping, batch_size, verbose = self.verbose, root_dir=self.data_dir ) )
     
@@ -2003,6 +2053,8 @@ def process_ncrop_result( result, ncrop):
     ret = np.zeros( (nsize, ny) ) 
     for i in range( nsize):
         ret[i,:] = np.mean( result[i*ncrop:(i+1)*ncrop, :], axis=0 )
+        # if i == 0:
+        #     print( "Result %d X %d Average %s to %s" % ( nx, ny, result[i*ncrop:(i+1)*ncrop, :], ret[i,:] ) )
     return ret
 
 class ImageReader:
@@ -2034,3 +2086,18 @@ def read_in_images( rootdir, pattern=".*.jpg", pool = None, dim_ordering='defaul
             # print (img.shape )
             images.append( img )
     return filelist, np.array( images )
+
+def print_layers( model, first = None, last = None ):
+    nlayers = len( model.layers )
+    idx = 0
+    for layer in model.layers:
+        bPrint = True
+        if first or last:
+            bPrint = False
+            if first and idx < first:
+                bPrint = True
+            if last and idx >= nlayers - last:
+                bPrint = True
+        if bPrint:
+            print ( "Layer %d ==== %s" % (idx, layer.name ) )
+        idx += 1
