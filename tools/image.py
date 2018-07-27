@@ -1645,7 +1645,7 @@ class MetadataSeq():
     def __iter__(self):
         return self  
     def __len__(self):
-        return len(self.filelist)
+        return len(self.filelist) // self.batch_size 
     def __next__(self):
         filenames = []
         labels = []
