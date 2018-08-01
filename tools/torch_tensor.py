@@ -57,7 +57,7 @@ class SequenceEnqueuer():
     def __init__(self, generator,
                  allow_exception = False, 
                  wait_time=0.001, 
-                 number_warning = 5, 
+                 number_warning = 1000000, 
                  monitor_queue = False ):
         self.number_warning = number_warning
         self.wait_time = wait_time
@@ -88,13 +88,16 @@ class SequenceEnqueuer():
                 all_finished = self.end_reached # all([not thread.is_alive() for thread in self._threads])
                 if all_finished and self.queue.empty():
                     # stop generator task
+                    # print ("End of epoch reached, raise StopIteration" )
                     self._stop_event.set()
-                    raise StopIteration()
+                    raise StopIteration
                 else:
-                    elapse = time.time() - self.start_time
+                    cur = time.time()
+                    elapse = cur - self.start_time
                     if elapse > 10.0: 
                         if self.number_warning > 0:
                             self.number_warning -= 1
+                            self.start_time = cur
                             print( "Data queue drained, please consider to increase the number of worker thread" )
                     time.sleep(self.wait_time)
 
@@ -103,6 +106,10 @@ class SequenceEnqueuer():
             success, value = self.queue.get()
             if not success:
                 six.reraise(value.__class__, value, value.__traceback__)
+            return value
+        
+        # print ("End of epoch reached, raise StopIteration" )
+        raise StopIteration
         
     def len(self):
         return self._generator.len()
@@ -125,6 +132,7 @@ class SequenceEnqueuer():
                     else:
                         time.sleep(self.wait_time)
                 except StopIteration:
+                    # print( "Stop Iterateration encountered" )
                     self._stop_event.set()
                     self.end_reached = True
                     break
@@ -134,6 +142,7 @@ class SequenceEnqueuer():
                     if not self.allow_exception:
                         if not hasattr(e, '__traceback__'):
                             setattr(e, '__traceback__', sys.exc_info()[2])
+                        # print( "Exception occurred %s " % e )
                         self.queue.put((False, e))
                         self._stop_event.set()
                         self.end_reached = True
@@ -160,7 +169,8 @@ class SequenceEnqueuer():
                 thread = threading.Thread(target=self._data_generator_task)
                 self._threads.append(thread)
                 thread.start()
-        except:
+        except Exception as e:
+            # print( "Data generator thread stops for exception %s" % e )
             self.stop()
             raise
 
@@ -175,6 +185,7 @@ class SequenceEnqueuer():
         # Arguments
             timeout: maximum time to wait on `thread.join()`.
         """
+        # print( "SequenceEnqueuer stop is called" )
         if self.is_running():
             self._stop_event.set()
 
@@ -203,6 +214,7 @@ class TensorEnqueuer():
     def __len__(self):
         return len(self._generator)
     def __iter__(self):
+        # print ("Iterator on TensorEnqueue called" )
         # This allow multiple loop to start over the current TensorEnqueuer
         sequence = SequenceEnqueuer( self._generator, allow_exception = self.allow_exception, wait_time = self.wait_time ) 
         sequence.start( max_queue_size = self.max_queue_size )
