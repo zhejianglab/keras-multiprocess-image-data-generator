@@ -1867,6 +1867,10 @@ class DatasetSubdirectory():
         lst = []
         cnt = 0
         bComputeMapping = False
+        if classes is None and mapping is None:
+            classes = sorted( map( lambda x : x[0], metadata.items() ))
+            # print (classes)
+        
         if not (mapping is None): 
             self.mapping = mapping
             mx = 0 
@@ -1880,15 +1884,11 @@ class DatasetSubdirectory():
                 for idx, classname in enumerate(classes):
                     self.mapping[classname] = idx
                 self.classnames = classes
-            else:
-                bComputeMapping = True
         if splits is None:
             splits = {}
+            
         # print(len(self.metadata))
         for classname, filesinfo in metadata.items():
-            if bComputeMapping:
-                self.mapping[classname] = cnt
-                self.classnames.append( classname )
             cl = self.mapping[classname]
             for file in filesinfo:
                 lst.append( (file, cl) ) 
