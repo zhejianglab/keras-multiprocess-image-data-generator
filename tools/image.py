@@ -15,6 +15,7 @@ import threading
 import warnings
 import json
 import random
+import sys
 
 # from .. import backend as K
 import keras.backend as K
@@ -2101,3 +2102,17 @@ def print_layers( model, first = None, last = None ):
         if bPrint:
             print ( "Layer %d ==== %s" % (idx, layer.name ) )
         idx += 1
+        
+class Tee(object):
+    def __init__(self, name):
+        self.file = open(name, "w")
+        self.stdout = sys.stdout
+        sys.stdout = self
+    def __del__(self):
+        sys.stdout = self.stdout
+        self.file.close()
+    def write(self, data):
+        self.file.write(data)
+        self.stdout.write(data)
+    def flush(self):
+        self.file.flush()
