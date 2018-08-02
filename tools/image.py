@@ -1879,6 +1879,8 @@ class DatasetSubdirectory():
             self.classnames = []
             self.mapping = {}
             for key, keyinfo in tuples:
+                if int( key ) != len( self.classnames ):
+                    print ("Out of order: %s %s" % (key, keyinfo) )
                 self.classnames.append( keyinfo[0] )
                 if keyinfo[0] < lastname: 
                     print( "Out of order: %s: %s (last: %s)" % (key, keyinfo, lastname ) )
@@ -1886,6 +1888,7 @@ class DatasetSubdirectory():
                 lastname = keyinfo[0]
                 for name in keyinfo:
                     self.mapping[name] = int( key ) 
+                
             if not bOrdered:
                 print( "Caution: class_index is not ordered" )
             else:
