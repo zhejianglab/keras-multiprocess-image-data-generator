@@ -16,9 +16,11 @@ import warnings
 import json
 import random
 import sys
+from operator import itemgetter
 
 # from .. import backend as K
 import keras.backend as K
+
 
 try:
     from PIL import Image as pil_image
@@ -1861,29 +1863,51 @@ class DatasetSubdirectory():
     # Train threshold: at least this number of samples in training. 
     # Mapping: a dictionary that maps a class name (subdirectory) to a category
     # classes: a list of classes that intrepret classname -> pos
-    def prepare( self, seed = 0, splits = {"train": 80, "val": 20 }, train_threshold = 5, classes = None, mapping = None ): 
+    def prepare( self, seed = 0, splits = {"train": 80, "val": 20 }, train_threshold = 5, classes = None, 
+                mapping = None, class_index = None ): 
         with open( self.metadata_file, "r") as fp:
             metadata = json.load( fp )
         lst = []
         cnt = 0
         bComputeMapping = False
-        if classes is None and mapping is None:
-            classes = sorted( map( lambda x : x[0], metadata.items() ))
-            # print (classes)
-        
-        if not (mapping is None): 
-            self.mapping = mapping
-            mx = 0 
-            for key, value in mapping.items():
-                mx = max( mx, value )
-            self.classnames = "0" * (mx + 1 )
-            for key, value in mapping.items():
-                self.classnames[value] = key
+        if class_index is not None:
+            # class_index is in the form of imagenet_utils.get_imagenet_class_index()
+            # it is a dictionary with entry '465': ['n02916936', 'bulletproof_vest'],
+            tuples = sorted( class_index.items(), key = itemgetter(1) )
+            lastname = ""
+            bOrdered = True
+            self.classnames = []
+            self.mapping = {}
+            for key, keyinfo in tuples:
+                self.classnames.append( keyinfo[0] )
+                if keyinfo[0] < lastname: 
+                    print( "Out of order: %s: %s (last: %s)" % (key, keyinfo, lastname ) )
+                    bOrdered = False
+                lastname = keyinfo[0]
+                for name in keyinfo:
+                    self.mapping[name] = int( key ) 
+            if not bOrdered:
+                print( "Caution: class_index is not ordered" )
+            else:
+                print( "class_index is properly ordered" )
         else:
-            if not (classes is None):
-                for idx, classname in enumerate(classes):
-                    self.mapping[classname] = idx
-                self.classnames = classes
+            if classes is None and mapping is None:
+                classes = sorted( map( lambda x : x[0], metadata.items() ))
+                # print (classes)
+
+            if not (mapping is None): 
+                self.mapping = mapping
+                mx = 0 
+                for key, value in mapping.items():
+                    mx = max( mx, value )
+                self.classnames = "0" * (mx + 1 )
+                for key, value in mapping.items():
+                    self.classnames[value] = key
+            else:
+                if not (classes is None):
+                    for idx, classname in enumerate(classes):
+                        self.mapping[classname] = idx
+                    self.classnames = classes
         if splits is None:
             splits = {}
             
@@ -1952,11 +1976,14 @@ class DatasetSubdirectory():
         for tup in lst:
             fname = tup[0]
             cl = tup[1]
-            classname = self.classnames[cl]
-            self.list["all"].append( (os.path.join( classname, fname), cl ) )
-            if not ( classname in self.metadata["all"] ):
-                self.metadata["all"][classname] = []
-            self.metadata["all"][classname].append( fname ) 
+            try:
+                classname = self.classnames[cl]
+                self.list["all"].append( (os.path.join( classname, fname), cl ) )
+                if not ( classname in self.metadata["all"] ):
+                    self.metadata["all"][classname] = []
+                self.metadata["all"][classname].append( fname ) 
+            except:
+                print( "Entry not properly formatted fname, cl == %s, %s" % (fname, cl) )
             
         for key, value in self.list.items():
             print( "%s Data %s has %d items" % (self.data_dir, key, len(self.list[key]) ) )
@@ -2105,10 +2132,12 @@ def print_layers( model, first = None, last = None ):
         
 class Tee(object):
     def __init__(self, name):
-        self.file = open(name, "w")
+        print( "Tee started, output buffered to %s" %name )
+        self.file = open(name, "w", 1)
         self.stdout = sys.stdout
         sys.stdout = self
     def __del__(self):
+        print( "Tee stopped" )
         sys.stdout = self.stdout
         self.file.close()
     def write(self, data):
@@ -2116,3 +2145,4 @@ class Tee(object):
         self.stdout.write(data)
     def flush(self):
         self.file.flush()
+        
