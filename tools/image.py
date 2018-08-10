@@ -641,6 +641,7 @@ class ImageDataGenerator(object):
                             save_to_dir=None,
                             save_prefix='',
                             save_format='jpeg',
+                            image_in_memory = False,
                             follow_links=False):
         return MetadataIterator(
             metaFunc, self,
@@ -652,6 +653,7 @@ class ImageDataGenerator(object):
             save_prefix=save_prefix,
             save_format=save_format,
             follow_links=follow_links,
+            image_in_memory = image_in_memory,
             pool=self.pool)
     
     def flow_from_metaseq( self, metaSeq, 
@@ -662,7 +664,8 @@ class ImageDataGenerator(object):
                             save_prefix='',
                             save_format='jpeg',
                             follow_links=False, 
-                            raise_exception = False ):
+                            raise_exception = False,
+                            image_in_memory = False):
         """ Returning a sequence for training/evaluation
         """
         return MetadataSeqIterator(
@@ -676,6 +679,7 @@ class ImageDataGenerator(object):
             save_format=save_format,
             follow_links=follow_links,
             raise_exception = raise_exception,
+            image_in_memory = image_in_memory,
             pool=self.pool)
     
     def flow_from_metaseq_siamese( self, metaSeq, 
@@ -906,6 +910,23 @@ def process_image_pipeline_dir(tup):
     for (func, kwargs) in pipeline:
         x = func(x, rng=rng, **kwargs)
     return x
+
+def process_image_pipeline_dir_cache(tup):
+    """ Worker function for DirectoryIterator multiprocessing.Pool
+    """
+    (pipeline, fname, directory, grayscale,
+    target_size, dim_ordering, rng,image_cache) = tup
+    if image_cache is not None:
+        img = image_cache
+    else:
+        img = load_img(os.path.join(directory, fname),
+                       grayscale=grayscale,
+                       target_size=target_size)
+    x = img_to_array(img, dim_ordering=dim_ordering)
+    for (func, kwargs) in pipeline:
+        x = func(x, rng=rng, **kwargs)
+    return (x,fname,img)
+
 
 class NumpyArrayIterator(Iterator):
 
@@ -1314,6 +1335,7 @@ class MetadataIterator(Iterator):
                  classes=None, class_mode='categorical',
                  batch_size=32, shuffle=True, seed=None,
                  save_to_dir=None, save_prefix='', save_format='jpeg',
+                 image_in_memory = False,
                  follow_links=False, pool=None):
         if dim_ordering == 'default':
             dim_ordering = K.image_dim_ordering()
@@ -1373,14 +1395,22 @@ class MetadataIterator(Iterator):
         self.directory = "/"
         self.firstPrint = True # Disable printing for debugging. 
 
+        self.image_in_memory = image_in_memory
+        self.image_cache = {}        
+        
         super(MetadataIterator, self).__init__(self.nb_sample, batch_size, shuffle, seed)
 
     def next(self):
         with self.lock:
             index_array, current_index, current_batch_size = next(self.index_generator)
+            
         # The transformation of images is not under thread lock
         # so it can be done in parallel
-
+            if self.image_in_memory:
+                for filename in filenames:
+                    if filename not in self.image_cache:
+                        self.image_cache[filename] = None      
+                        
         batch_x = None
         grayscale = self.color_mode == 'grayscale'
         
@@ -1398,13 +1428,28 @@ class MetadataIterator(Iterator):
             while not bDone:
                 try:
                     pipeline = self.image_data_generator.pipeline()
-                    result = self.pool.map(process_image_pipeline_dir, ((pipeline,
-                        self.filenames[j],
-                        self.directory,
-                        grayscale,
-                        self.target_size,
-                        self.dim_ordering,
-                        self.rngs[i%self.batch_size]) for i, j in enumerate(index_array)))
+                    
+                    if self.image_in_memory:
+                        tmp_results = self.pool.map(process_image_pipeline_dir_cache, ((pipeline,
+                            filenames[i],
+                            self.directory,
+                            grayscale,
+                            self.target_size,
+                            self.dim_ordering,
+                            self.rngs[i%self.batch_size],
+                            self.image_cache[filenames[i]]) for i in range(nsize) ))
+                        result = [x for x,filename,img in tmp_results]
+                        for x,filename,img in tmp_results:
+                            if self.image_cache[filename] is None:
+                                self.image_cache[filename] = img          
+                    else:                    
+                        result = self.pool.map(process_image_pipeline_dir, ((pipeline,
+                            self.filenames[j],
+                            self.directory,
+                            grayscale,
+                            self.target_size,
+                            self.dim_ordering,
+                            self.rngs[i%self.batch_size]) for i, j in enumerate(index_array)))
                     bDone = True
                 except:
                     # Error happens in the last block 
@@ -1457,6 +1502,7 @@ class MetadataSeqIterator(Iterator):
                  save_to_dir=None, save_prefix='', save_format='jpeg',
                  follow_links=False, 
                  raise_exception = False, 
+                 image_in_memory = False,
                  pool=None):
         if dim_ordering == 'default':
             dim_ordering = K.image_dim_ordering()
@@ -1514,6 +1560,10 @@ class MetadataSeqIterator(Iterator):
         self.directory = "/"
         self.firstPrint = True # Disable printing for debugging. 
         self.raise_exception = raise_exception
+        
+        self.image_in_memory = image_in_memory
+        self.image_cache = {}
+        
         super(MetadataSeqIterator, self).__init__(self.nb_sample, batch_size, shuffle, seed)
     
     def reset(self):
@@ -1532,6 +1582,10 @@ class MetadataSeqIterator(Iterator):
                 if self.raise_exception:
                     raise
                 filenames, labels, classnames = next(self.metadataSeq)
+            if self.image_in_memory:
+                for filename in filenames:
+                    if filename not in self.image_cache:
+                        self.image_cache[filename] = None                
         # The transformation of images is not under thread lock
         # so it can be done in parallel
 
@@ -1546,16 +1600,34 @@ class MetadataSeqIterator(Iterator):
         if self.pool:
             bDone = False 
             while not bDone:
+               
+                bDone = True                
                 try:
                     nsize = len( filenames ) 
                     pipeline = self.image_data_generator.pipeline()
-                    result = self.pool.map(process_image_pipeline_dir, ((pipeline,
-                        filenames[i],
-                        self.directory,
-                        grayscale,
-                        self.target_size,
-                        self.dim_ordering,
-                        self.rngs[i%self.batch_size]) for i in range(nsize) ))
+                    if self.image_in_memory:
+                        tmp_results = self.pool.map(process_image_pipeline_dir_cache, ((pipeline,
+                            filenames[i],
+                            self.directory,
+                            grayscale,
+                            self.target_size,
+                            self.dim_ordering,
+                            self.rngs[i%self.batch_size],
+                            self.image_cache[filenames[i]]) for i in range(nsize) ))
+                        result = [x for x,filename,img in tmp_results]
+                        for x,filename,img in tmp_results:
+                            if self.image_cache[filename] is None:
+                                self.image_cache[filename] = img          
+                    else:
+                        result = self.pool.map(process_image_pipeline_dir, ((pipeline,
+                            filenames[i],
+                            self.directory,
+                            grayscale,
+                            self.target_size,
+                            self.dim_ordering,
+                            self.rngs[i%self.batch_size]) for i in range(nsize) ))
+                        
+                    
                     bDone = True
                 except:
                     # Error happens in the last block 
